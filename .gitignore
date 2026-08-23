@@ -14,3 +14,4 @@ venv/
 
 # Generated scan reports
 scan_reports/
+logs/
