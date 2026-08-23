@@ -8,6 +8,8 @@ from packaging import version
 from .db_client import CVEClient
 from .normalizer import normalize_ecosystem, normalize_package_name
 from .updater import IntelligenceUpdater
+from src.exceptions import DatabaseError, UpstreamAPIError
+from src.logger import logger
 
 
 class MatchingEngine:
@@ -18,7 +20,7 @@ class MatchingEngine:
 
     def scan_sbom(self, sbom_data: Dict) -> List[Dict]:
         """FR 3.4 & 3.5: Compares SBOM packages against intelligence database."""
-        print("=== Starting Vulnerability Matching ===")
+        logger.info("Starting vulnerability matching")
         findings: List[Dict] = []
 
         for pkg in sbom_data.get("packages", []):
@@ -30,10 +32,16 @@ class MatchingEngine:
             cache_key = f"{normalized_name}::{ecosystem}"
 
             if cache_key not in self.queried_packages:
-                self.updater.fetch_and_cache(normalized_name, ecosystem)
+                try:
+                    self.updater.fetch_and_cache(normalized_name, ecosystem)
+                except UpstreamAPIError as exc:
+                    logger.warning("Upstream lookup unavailable for %s: %s", normalized_name, exc)
                 self.queried_packages.add(cache_key)
 
-            known_vulns = self.db.get_vulnerabilities(normalized_name, ecosystem)
+            try:
+                known_vulns = self.db.get_vulnerabilities(normalized_name, ecosystem)
+            except DatabaseError:
+                raise
             for vuln in known_vulns:
                 if self._is_vulnerable(pkg["version"], vuln["fixed_version"]):
                     findings.append(
@@ -47,7 +55,7 @@ class MatchingEngine:
                         }
                     )
 
-        print(f"[+] Matching complete. Found {len(findings)} vulnerabilities.")
+        logger.info("Matching complete; found %d vulnerabilities", len(findings))
         return findings
 
     def _is_vulnerable(self, installed_ver: str, fixed_ver: str) -> bool:

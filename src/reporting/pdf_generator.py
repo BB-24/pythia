@@ -3,6 +3,9 @@ from __future__ import annotations
 from jinja2 import Template
 from weasyprint import HTML
 
+from src.exceptions import ReportGenerationError
+from src.logger import logger
+
 REPORT_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -76,14 +79,16 @@ REPORT_TEMPLATE = """
 
 def generate_pdf(report_data: dict, output_path: str):
     """FR 4.3: Renders HTML template with scan data and outputs a PDF."""
-    print("[~] Generating PDF report...")
-
-    template = Template(REPORT_TEMPLATE)
-    html_content = template.render(
-        metadata=report_data["scan_metadata"],
-        summary=report_data["summary"],
-        vulnerabilities=report_data["vulnerabilities"],
-    )
-
-    HTML(string=html_content).write_pdf(output_path)
-    print(f"[+] PDF Report successfully saved to: {output_path}")
+    logger.info("Generating PDF report at %s", output_path)
+    try:
+        template = Template(REPORT_TEMPLATE)
+        html_content = template.render(
+            metadata=report_data["scan_metadata"],
+            summary=report_data["summary"],
+            vulnerabilities=report_data["vulnerabilities"],
+        )
+        HTML(string=html_content).write_pdf(output_path)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        logger.error("PDF report generation failed: %s", exc, exc_info=True)
+        raise ReportGenerationError(f"Unable to generate PDF report: {output_path}") from exc
+    logger.info("PDF report saved to %s", output_path)
