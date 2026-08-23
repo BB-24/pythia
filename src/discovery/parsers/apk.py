@@ -1,5 +1,7 @@
 import os
 from ..sbom import Package
+from src.exceptions import ParserError
+from src.logger import logger
 
 
 def parse_apk(filepath: str, source_layer: str = "rootfs") -> list[Package]:
@@ -10,7 +12,13 @@ def parse_apk(filepath: str, source_layer: str = "rootfs") -> list[Package]:
     if not os.path.exists(filepath):
         return packages
 
-    with open(filepath, "r", encoding="utf-8", errors="ignore") as handle:
+    try:
+        handle = open(filepath, "r", encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        logger.error("Unable to read APK database %s: %s", filepath, exc, exc_info=True)
+        raise ParserError(f"Unable to read APK database: {filepath}") from exc
+
+    with handle:
         for raw_line in handle:
             line = raw_line.strip()
             if not line:

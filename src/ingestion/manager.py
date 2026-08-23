@@ -1,9 +1,12 @@
 import os
 import tarfile
 import tempfile
+import shutil
 
 from .extractor import ImageExtractor
 from .registry_client import RegistryClient
+from src.exceptions import ExtractionError
+from src.logger import logger
 
 
 class IngestionManager:
@@ -18,7 +21,7 @@ class IngestionManager:
     def ingest_from_registry(self, image_tag: str, registry_username: str | None = None,
                             registry_password: str | None = None) -> str:
         """FR 1.1: Orchestrates fetching and unpacking an image."""
-        print(f"=== Starting Ingestion for {image_tag} ===")
+        logger.info("Starting registry ingestion for %s", image_tag)
 
         client = RegistryClient(
             image_ref=image_tag,
@@ -33,35 +36,41 @@ class IngestionManager:
             extractor.extract_layer(tar_path)
             os.remove(tar_path)
 
-        print(f"=== Ingestion Complete. RootFS ready at: {self.rootfs_dir} ===")
+        logger.info("Registry ingestion complete; root filesystem is %s", self.rootfs_dir)
         return self.rootfs_dir
 
     def ingest_from_archive(self, archive_path: str) -> str:
         """Loads a local Docker image tarball into the flattened root filesystem."""
         if not os.path.exists(archive_path):
-            raise FileNotFoundError(f"Archive not found: {archive_path}")
+            raise ExtractionError(f"Archive not found: {archive_path}")
 
-        print(f"=== Loading local image archive: {archive_path} ===")
-        extractor = ImageExtractor(self.rootfs_dir)
+        logger.info("Loading local image archive %s", archive_path)
 
-        with tarfile.open(archive_path, "r:*") as archive:
-            for member in archive.getmembers():
-                if member.name.endswith("/manifest.json"):
-                    continue
-                if member.isdir():
-                    target = os.path.join(self.rootfs_dir, member.name)
-                    os.makedirs(target, exist_ok=True)
-                    continue
-                if member.isfile() or member.isreg():
-                    archive.extract(member, path=self.rootfs_dir)
+        try:
+            with tarfile.open(archive_path, "r:*") as archive:
+                for member in archive.getmembers():
+                    if member.name.endswith("/manifest.json"):
+                        continue
+                    target = (os.path.abspath(os.path.join(self.rootfs_dir, member.name)))
+                    if not target.startswith(os.path.abspath(self.rootfs_dir) + os.sep):
+                        logger.warning("Skipping unsafe archive member %s", member.name)
+                        continue
+                    archive.extract(member, path=self.rootfs_dir, filter="data")
+        except (OSError, tarfile.TarError) as exc:
+            logger.error("Local image archive extraction failed: %s", exc, exc_info=True)
+            raise ExtractionError(f"Unable to extract archive: {archive_path}") from exc
 
-        print(f"=== Local archive extraction complete. RootFS ready at: {self.rootfs_dir} ===")
+        logger.info("Local archive extraction complete; root filesystem is %s", self.rootfs_dir)
         return self.rootfs_dir
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.cleanup()
+        return False
 
     def cleanup(self):
         if os.path.exists(self.temp_dir):
-            try:
-                import shutil
-                shutil.rmtree(self.temp_dir, ignore_errors=True)
-            except Exception:
-                pass
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+            logger.debug("Removed temporary scanner directory %s", self.temp_dir)

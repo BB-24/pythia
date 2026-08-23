@@ -2,6 +2,8 @@ import json
 import os
 
 from ..sbom import Package
+from src.exceptions import ParserError
+from src.logger import logger
 
 
 def parse_npm(filepath: str, source_layer: str = "rootfs") -> list[Package]:
@@ -14,7 +16,15 @@ def parse_npm(filepath: str, source_layer: str = "rootfs") -> list[Package]:
     try:
         with open(filepath, "r", encoding="utf-8") as handle:
             data = json.load(handle)
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError as exc:
+        logger.warning("Skipping corrupted npm lockfile %s: %s", filepath, exc)
+        return packages
+    except OSError as exc:
+        logger.error("Unable to read npm lockfile %s: %s", filepath, exc, exc_info=True)
+        raise ParserError(f"Unable to read npm lockfile: {filepath}") from exc
+
+    if not isinstance(data, dict):
+        logger.warning("Skipping npm lockfile with invalid root object %s", filepath)
         return packages
 
     if "packages" in data:

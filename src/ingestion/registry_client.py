@@ -2,6 +2,11 @@ import os
 from typing import List
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from src.exceptions import ImageNotFoundError, RegistryAuthError, UpstreamAPIError
+from src.logger import logger
 
 
 class RegistryClient:
@@ -10,6 +15,17 @@ class RegistryClient:
         self.password = password or os.getenv("REGISTRY_PASSWORD")
 
         self.image, self.tag, self.registry_url, self.auth_url = self._parse_image_reference(image_ref)
+        self.session = requests.Session()
+        retry = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            backoff_factor=0.5,
+            status_forcelist=(500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+            raise_on_status=False,
+        )
+        self.session.mount("https://", HTTPAdapter(max_retries=retry))
         self.token = self._get_auth_token()
 
     def _parse_image_reference(self, image_ref: str):
@@ -36,14 +52,12 @@ class RegistryClient:
                 repository = f"library/{image_name}"
             registry_host = "registry-1.docker.io"
 
-        if registry_host in {"docker.io", "index.docker.io"}:
+        if registry_host in {"docker.io", "index.docker.io", "registry-1.docker.io"}:
             registry_url = "https://registry-1.docker.io/v2"
             auth_url = "https://auth.docker.io/token"
-            registry_scope = f"repository:{repository}:pull"
         else:
             registry_url = f"https://{registry_host}/v2"
             auth_url = f"https://{registry_host}/v2/token"
-            registry_scope = f"repository:{repository}:pull"
 
         return repository, tag, registry_url, auth_url
 
@@ -56,11 +70,17 @@ class RegistryClient:
         if self.registry_url.startswith("https://") and "/v2" in self.registry_url and self.registry_url != "https://registry-1.docker.io/v2":
             params = {"scope": f"repository:{self.image}:pull"}
 
-        response = requests.get(self.auth_url, params=params, timeout=20)
-        if response.status_code == 401:
-            raise PermissionError("Registry authentication failed or the repository is private.")
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response = self.session.get(self.auth_url, params=params, timeout=10)
+            if response.status_code in (401, 403):
+                raise RegistryAuthError("Registry authentication failed or the repository is private.")
+            response.raise_for_status()
+            payload = response.json()
+        except RegistryAuthError:
+            raise
+        except requests.RequestException as exc:
+            logger.error("Registry token request failed for %s: %s", self.image, exc, exc_info=True)
+            raise UpstreamAPIError("Registry token request failed") from exc
         token = payload.get("token")
         if not token and payload.get("access_token"):
             token = payload["access_token"]
@@ -77,10 +97,18 @@ class RegistryClient:
     def fetch_manifest(self) -> List[str]:
         """FR 1.3: Download and parse the OCI image manifest to get layer digests."""
         url = f"{self.registry_url}/{self.image}/manifests/{self.tag}"
-        response = requests.get(url, headers=self._headers(), timeout=30)
-        if response.status_code == 401:
-            raise PermissionError("Authentication required to access the image manifest.")
-        response.raise_for_status()
+        try:
+            response = self.session.get(url, headers=self._headers(), timeout=10)
+            if response.status_code in (401, 403):
+                raise RegistryAuthError("Authentication required to access the image manifest.")
+            if response.status_code == 404:
+                raise ImageNotFoundError(f"Image manifest not found: {self.image}:{self.tag}")
+            response.raise_for_status()
+        except (RegistryAuthError, ImageNotFoundError):
+            raise
+        except requests.RequestException as exc:
+            logger.error("Manifest request failed for %s:%s: %s", self.image, self.tag, exc, exc_info=True)
+            raise UpstreamAPIError("Image manifest request failed") from exc
 
         manifest = response.json()
         if "manifests" in manifest:
@@ -89,26 +117,42 @@ class RegistryClient:
                 manifest["manifests"][0],
             )
             digest = manifest["digest"]
-            response = requests.get(f"{self.registry_url}/{self.image}/manifests/{digest}", headers=self._headers(), timeout=30)
-            response.raise_for_status()
+            try:
+                response = self.session.get(
+                    f"{self.registry_url}/{self.image}/manifests/{digest}",
+                    headers=self._headers(),
+                    timeout=10,
+                )
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                logger.error("Platform manifest request failed for %s: %s", self.image, exc, exc_info=True)
+                raise UpstreamAPIError("Platform manifest request failed") from exc
             manifest = response.json()
 
         layers = [layer["digest"] for layer in manifest.get("layers", [])]
-        print(f"[+] Parsed manifest for {self.image}:{self.tag}. Found {len(layers)} layers.")
+        logger.info("Parsed manifest for %s:%s; found %d layers", self.image, self.tag, len(layers))
         return layers
 
     def download_layer(self, digest: str, dest_dir: str) -> str:
         """Downloads a single .tar.gz layer blob from the registry."""
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        headers = self._headers()
         url = f"{self.registry_url}/{self.image}/blobs/{digest}"
         tar_path = os.path.join(dest_dir, f"{digest.replace('sha256:', '')}.tar.gz")
 
-        print(f"[~] Downloading layer {digest[:15]}...")
-        with requests.get(url, headers=headers, stream=True, timeout=60) as response:
-            response.raise_for_status()
-            with open(tar_path, "wb") as handle:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        handle.write(chunk)
+        logger.info("Downloading layer %s...", digest[:15])
+        try:
+            with self.session.get(url, headers=headers, stream=True, timeout=10) as response:
+                if response.status_code == 404:
+                    raise ImageNotFoundError(f"Image layer not found: {digest}")
+                response.raise_for_status()
+                with open(tar_path, "wb") as handle:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            handle.write(chunk)
+        except ImageNotFoundError:
+            raise
+        except requests.RequestException as exc:
+            logger.error("Layer download failed for %s: %s", digest, exc, exc_info=True)
+            raise UpstreamAPIError(f"Layer download failed: {digest}") from exc
 
         return tar_path
