@@ -11,3 +11,5 @@ venv/
 # Databases
 *.sqlite3
 *.db
+
+scan_reports/
