@@ -336,14 +336,25 @@ logging:
 
 ## Quick Start
 
+The scanner exposes a Click-based CLI. From the project root, run it directly with
+Python:
+
+```bash
+python cmd/cli.py --help
+python cmd/cli.py scan --help
+```
+
+If the project is installed with a console entry point, the equivalent command is
+`pythia`.
+
 ### Scan a Public Image
 ```bash
-pythia scan nginx:latest --pdf --out scan_results.json
+python cmd/cli.py scan nginx:latest --pdf --out scan_results.json
 ```
 
 ### Scan with Private Registry Auth
 ```bash
-pythia scan my-registry.example.com/myapp:prod \
+python cmd/cli.py scan my-registry.example.com/myapp:prod \
   --registry-user myuser \
   --registry-password mypassword \
   --pdf --out scan_results.json
@@ -352,20 +363,34 @@ pythia scan my-registry.example.com/myapp:prod \
 ### Scan Local Image Archive
 ```bash
 # Export from Docker first: docker save nginx:latest -o nginx.tar
-pythia scan ./nginx.tar --pdf --out scan_results.json
+python cmd/cli.py scan --archive ./nginx.tar --pdf --out scan_results.json
 ```
 
-### Update Vulnerability Cache
+The `scan` command requires exactly one input: either an image reference or
+`--archive PATH`. It writes a JSON report by default to
+`scan_reports/json/<scan-id>.json` and writes a matching log to
+`logs/<scan-id>.log`. Add `--pdf` to create
+`scan_reports/pdf/<scan-id>.pdf`.
+
+Each scan receives a unique ID automatically and prints it when the scan starts.
+Use `--scan-id` when an external system needs to choose the identifier:
+
 ```bash
-# Full update (first run or periodic)
+python cmd/cli.py scan nginx:latest --scan-id nightly-nginx-001
+```
+
+### Scan on Windows
+```powershell
+python cmd\cli.py scan nginx:latest --out scan_results.json
+python cmd\cli.py scan --archive .\nginx.tar --pdf --out .\reports\nginx.json
+```
+
+### Other Commands
+
+The following commands are planned but are not available in the current CLI:
+
+```bash
 pythia vuln update
-
-# Incremental (only changed since last update)
-pythia vuln update --incremental
-```
-
-### List Supported Parsers
-```bash
 pythia parsers list
 ```
 
@@ -375,26 +400,17 @@ pythia parsers list
 
 ### `pythia scan` — Scan a container image
 ```bash
-pythia scan [OPTIONS] IMAGE_REF
+python cmd/cli.py scan [OPTIONS] [IMAGE_REF]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `-o, --out PATH` | Output file path (JSON) |
+| `--archive PATH` | Path to a local Docker image tar archive; mutually exclusive with `IMAGE_REF` |
 | `--pdf` | Generate PDF report alongside JSON |
-| `--sarif` | Generate SARIF output |
-| `--format {json,pdf,sarif,cyclonedx,spdx}` | Output format(s) (repeatable) |
+| `--out PATH` | Output JSON file path; defaults to `scan_reports/json/<scan-id>.json` |
 | `--registry-user TEXT` | Registry username |
-| `--registry-password TEXT` | Registry password |
-| `--registry-token TEXT` | Registry bearer token |
-| `--insecure` | Allow HTTP (non-TLS) registry |
-| `--platform TEXT` | Target platform (e.g., `linux/amd64`, `linux/arm64`) |
-| `--no-cache` | Skip vulnerability cache, force upstream fetch |
-| `--severity {LOW,MEDIUM,HIGH,CRITICAL}` | Minimum severity to report |
-| `--fail-on {LOW,MEDIUM,HIGH,CRITICAL}` | Exit non-zero if vulns ≥ severity found |
-| `--parallel / --no-parallel` | Parallel layer downloads (default: on) |
-| `--keep-extracted` | Preserve extraction directory for debugging |
-| `-v, --verbose` | Increase log verbosity |
+| `--registry-password TEXT` | Registry password; entered as a hidden option value |
+| `--scan-id TEXT` | Custom filesystem-safe scan ID; generated automatically when omitted |
 
 ### `pythia vuln` — Vulnerability database management
 ```bash
