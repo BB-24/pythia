@@ -66,3 +66,21 @@ def scan_logging(scan_id: str, log_dir: str | Path = "logs"):
         logger.info("Scan finished: %s", scan_id)
         logger.removeHandler(handler)
         handler.close()
+
+
+@contextmanager
+def quiet_console_logging(level: int = logging.WARNING):
+    """Temporarily hide routine library logging from the interactive console."""
+    console_handlers = [
+        handler for handler in logger.handlers
+        if isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+    ]
+    previous_levels = {handler: handler.level for handler in console_handlers}
+    for handler in console_handlers:
+        handler.setLevel(level)
+    try:
+        yield
+    finally:
+        for handler, previous_level in previous_levels.items():
+            handler.setLevel(previous_level)
