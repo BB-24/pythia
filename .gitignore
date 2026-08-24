@@ -14,3 +14,10 @@ venv/
 
 # Generated scan reports
 scan_reports/
+pdf/
+logs/
+tests/test_ingestion.py.bak
+test_output.txt
+task_complete.txt
+scanner.log
+scan_results.json

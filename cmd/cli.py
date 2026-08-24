@@ -1,7 +1,11 @@
-import argparse
 import json
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
+
+import click
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -11,68 +15,84 @@ from src.matching.engine import MatchingEngine
 from src.reporting.json_formatter import generate_json_report
 from src.reporting.pdf_generator import generate_pdf
 from src.exceptions import ScannerBaseException
-from src.logger import logger
+from src.logger import logger, scan_logging
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Custom Docker Vulnerability Scanner")
-    parser.add_argument("image_ref", nargs="?", help="Docker image tag or local tar image archive")
-    parser.add_argument("--archive", dest="archive_path", help="Path to a local Docker image tar archive")
-    parser.add_argument("--pdf", action="store_true", help="Generate a PDF report")
-    parser.add_argument(
-        "--out",
-        default="scan_reports/json/scan_results.json",
-        help="Output JSON file path",
-    )
-    parser.add_argument("--registry-user", dest="registry_user", help="Username for a private registry")
-    parser.add_argument("--registry-password", dest="registry_password", help="Password for a private registry")
-    return parser.parse_args()
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.version_option(version="0.1.0", prog_name="pythia")
+def cli():
+    """Pythia container vulnerability scanner."""
+
+
+@cli.command("scan")
+@click.argument("image_ref", required=False)
+@click.option(
+    "--archive",
+    "archive_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to a local Docker image tar archive.",
+)
+@click.option("--pdf", is_flag=True, help="Generate a PDF report alongside JSON.")
+@click.option(
+    "--out",
+    "output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Output JSON file path. Defaults to a unique scan report path.",
+)
+@click.option("--registry-user", help="Username for a private registry.")
+@click.option("--registry-password", hide_input=True, help="Password for a private registry.")
+@click.option("--scan-id", help="Custom scan ID; generated automatically when omitted.")
+def scan(image_ref, archive_path, pdf, output_path, registry_user, registry_password, scan_id):
+    """Scan a registry image or local Docker archive."""
+    if bool(image_ref) == bool(archive_path):
+        raise click.UsageError("Provide exactly one IMAGE_REF or --archive PATH.")
+    if scan_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", scan_id):
+        raise click.UsageError(
+            "SCAN_ID may contain only letters, numbers, dots, underscores, and hyphens."
+        )
+
+    scan_id = scan_id or f"scan-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{uuid4().hex[:8]}"
+    output_path = output_path or Path("scan_reports") / "json" / f"{scan_id}.json"
+    ingestion = IngestionManager()
+    with scan_logging(scan_id) as log_path:
+        try:
+            image_target = str(archive_path) if archive_path else image_ref
+            if archive_path:
+                rootfs = ingestion.ingest_from_archive(str(archive_path))
+            else:
+                rootfs = ingestion.ingest_from_registry(
+                    image_ref,
+                    registry_username=registry_user,
+                    registry_password=registry_password,
+                )
+
+            sbom_data = DiscoveryManager(rootfs).generate_sbom().to_json()
+            vulnerabilities = MatchingEngine().scan_sbom(sbom_data)
+            report_data = generate_json_report(image_target, sbom_data, vulnerabilities, scan_id=scan_id)
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with output_path.open("w", encoding="utf-8") as handle:
+                json.dump(report_data, handle, indent=2)
+            click.echo(f"Scan ID: {scan_id}")
+            click.echo(f"JSON report saved to {output_path}")
+            click.echo(f"Scan log saved to {log_path}")
+
+            if pdf:
+                pdf_path = output_path.parent.parent / "pdf" / f"{output_path.stem}.pdf"
+                pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                generated_pdf_path = generate_pdf(report_data, output_path=pdf_path)
+                click.echo(f"PDF report saved to {generated_pdf_path}")
+        except ScannerBaseException as exc:
+            logger.error("Scan failed: %s", exc)
+            raise click.ClickException(str(exc)) from exc
+        except KeyboardInterrupt:
+            raise click.Abort() from None
+        finally:
+            ingestion.cleanup()
 
 
 def main():
-    args = parse_args()
-    if not args.image_ref and not args.archive_path:
-        raise SystemExit("Either an image tag or --archive path must be provided.")
-
-    try:
-        ingestion = IngestionManager()
-        matching_engine = MatchingEngine()
-        image_target = args.image_ref or args.archive_path
-        if args.archive_path:
-            rootfs = ingestion.ingest_from_archive(args.archive_path)
-        else:
-            rootfs = ingestion.ingest_from_registry(
-                args.image_ref,
-                registry_username=args.registry_user,
-                registry_password=args.registry_password,
-            )
-
-        discovery = DiscoveryManager(rootfs)
-        sbom = discovery.generate_sbom()
-        sbom_data = sbom.to_json()
-
-        vulnerabilities = matching_engine.scan_sbom(sbom_data)
-        report_data = generate_json_report(image_target, sbom_data, vulnerabilities)
-
-        output_path = Path(args.out)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w", encoding="utf-8") as handle:
-            json.dump(report_data, handle, indent=2)
-        logger.info("JSON report saved to %s", output_path)
-
-        if args.pdf:
-            pdf_path = output_path.parent.parent / "pdf" / f"{output_path.stem}.pdf"
-            pdf_path.parent.mkdir(parents=True, exist_ok=True)
-            generate_pdf(report_data, output_path=pdf_path)
-    except ScannerBaseException as exc:
-        logger.error("Scan failed: %s", exc)
-        raise SystemExit(1) from exc
-    except KeyboardInterrupt:
-        logger.warning("Scan interrupted by user")
-        raise SystemExit(130)
-    finally:
-        if "ingestion" in locals():
-            ingestion.cleanup()
+    cli()
 
 
 if __name__ == "__main__":

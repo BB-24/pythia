@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import tempfile
+from uuid import uuid4
+from pathlib import Path
+
 from jinja2 import Template
 from weasyprint import HTML
 
@@ -80,15 +85,39 @@ REPORT_TEMPLATE = """
 def generate_pdf(report_data: dict, output_path: str):
     """FR 4.3: Renders HTML template with scan data and outputs a PDF."""
     logger.info("Generating PDF report at %s", output_path)
+    destination = Path(output_path)
+    temporary_path = None
     try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
         template = Template(REPORT_TEMPLATE)
         html_content = template.render(
             metadata=report_data["scan_metadata"],
             summary=report_data["summary"],
             vulnerabilities=report_data["vulnerabilities"],
         )
-        HTML(string=html_content).write_pdf(output_path)
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".pdf", prefix=f".{destination.stem}-", dir=destination.parent,
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+        HTML(string=html_content).write_pdf(str(temporary_path))
+        try:
+            os.replace(temporary_path, destination)
+        except PermissionError:
+            fallback = destination.with_name(
+                f"{destination.stem}-{uuid4().hex[:8]}{destination.suffix}"
+            )
+            os.replace(temporary_path, fallback)
+            destination = fallback
+            logger.warning("PDF destination was locked; saved report to %s", fallback)
     except (OSError, KeyError, TypeError, ValueError) as exc:
         logger.error("PDF report generation failed: %s", exc, exc_info=True)
-        raise ReportGenerationError(f"Unable to generate PDF report: {output_path}") from exc
-    logger.info("PDF report saved to %s", output_path)
+        raise ReportGenerationError(
+            f"Unable to generate PDF report: {output_path}. "
+            "Close any program using the destination PDF and try again."
+        ) from exc
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink(missing_ok=True)
+    logger.info("PDF report saved to %s", destination)
+    return str(destination)

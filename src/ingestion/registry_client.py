@@ -44,7 +44,10 @@ class RegistryClient:
 
         registry_host = "registry-1.docker.io"
         repository = image_name
-        if "/" in image_name and image_name.split("/", 1)[0].count(".") or ":" in image_name.split("/", 1)[0]:
+        if "/" in image_name and (
+            image_name.split("/", 1)[0].count(".")
+            or ":" in image_name.split("/", 1)[0]
+        ):
             registry_host, repository = image_name.split("/", 1)
             repository = repository.strip("/")
         else:
@@ -66,12 +69,19 @@ class RegistryClient:
         if self.username and self.password:
             return "basic-auth"
 
-        params = {"service": "registry.docker.io", "scope": f"repository:{self.image}:pull"}
-        if self.registry_url.startswith("https://") and "/v2" in self.registry_url and self.registry_url != "https://registry-1.docker.io/v2":
-            params = {"scope": f"repository:{self.image}:pull"}
+        is_docker_hub = self.auth_url == "https://auth.docker.io/token"
+        params = {"scope": f"repository:{self.image}:pull"}
+        if is_docker_hub:
+            params["service"] = "registry.docker.io"
 
         try:
             response = self.session.get(self.auth_url, params=params, timeout=10)
+            if response.status_code == 404:
+                logger.warning(
+                    "Token endpoint returned 404 for %s; trying without authentication",
+                    self.image,
+                )
+                return ""
             if response.status_code in (401, 403):
                 raise RegistryAuthError("Registry authentication failed or the repository is private.")
             response.raise_for_status()

@@ -2,7 +2,12 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 
-def generate_json_report(image_tag: str, sbom: Dict, vulnerabilities: List[Dict]) -> Dict:
+def generate_json_report(
+    image_tag: str,
+    sbom: Dict,
+    vulnerabilities: List[Dict],
+    scan_id: str | None = None,
+) -> Dict:
     """FR 4.1: Structures the complete scan results into a standardized JSON payload."""
     critical = len([v for v in vulnerabilities if v.get("severity") == "CRITICAL"])
     high = len([v for v in vulnerabilities if v.get("severity") == "HIGH"])
@@ -11,6 +16,7 @@ def generate_json_report(image_tag: str, sbom: Dict, vulnerabilities: List[Dict]
 
     return {
         "scan_metadata": {
+            "scan_id": scan_id,
             "target_image": image_tag,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
