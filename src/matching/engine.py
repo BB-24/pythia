@@ -23,21 +23,23 @@ class MatchingEngine:
         logger.info("Starting vulnerability matching")
         findings: List[Dict] = []
 
+        normalized_packages = []
         for pkg in sbom_data.get("packages", []):
             ecosystem = normalize_ecosystem(pkg["type"])
             if ecosystem == "Unknown":
                 continue
 
             normalized_name = normalize_package_name(pkg["name"], ecosystem)
-            cache_key = f"{normalized_name}::{ecosystem}"
+            normalized_packages.append((pkg, normalized_name, ecosystem))
 
-            if cache_key not in self.queried_packages:
-                try:
-                    self.updater.fetch_and_cache(normalized_name, ecosystem)
-                except UpstreamAPIError as exc:
-                    logger.warning("Upstream lookup unavailable for %s: %s", normalized_name, exc)
-                self.queried_packages.add(cache_key)
+        try:
+            self.updater.prefetch_packages(
+                [(name, ecosystem) for _, name, ecosystem in normalized_packages]
+            )
+        except UpstreamAPIError as exc:
+            logger.warning("Upstream lookup unavailable: %s", exc)
 
+        for pkg, normalized_name, ecosystem in normalized_packages:
             try:
                 known_vulns = self.db.get_vulnerabilities(normalized_name, ecosystem)
             except DatabaseError:

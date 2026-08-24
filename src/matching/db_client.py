@@ -1,4 +1,5 @@
 import sqlite3
+import time
 from typing import Dict, List
 
 from src.exceptions import DatabaseError
@@ -24,6 +25,17 @@ class CVEClient:
                         severity TEXT,
                         source TEXT,
                         PRIMARY KEY (id, package_name, ecosystem, fixed_version)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS package_cache (
+                        package_name TEXT NOT NULL,
+                        ecosystem TEXT NOT NULL,
+                        checked_at REAL NOT NULL,
+                        vulnerability_count INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (package_name, ecosystem)
                     )
                     """
                 )
@@ -65,10 +77,43 @@ class CVEClient:
             logger.error("Unable to cache vulnerability %s: %s", vuln_data.get("id"), exc, exc_info=True)
             raise DatabaseError("Unable to cache vulnerability") from exc
 
+    def is_package_cached(self, package: str, ecosystem: str, max_age_seconds: float) -> bool:
+        """Return whether a positive or negative lookup is still fresh."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT checked_at FROM package_cache WHERE package_name = ? AND ecosystem = ?",
+                    (package, ecosystem),
+                ).fetchone()
+                return row is not None and time.time() - row[0] <= max_age_seconds
+        except sqlite3.Error as exc:
+            logger.error("Unable to query package cache: %s", exc, exc_info=True)
+            raise DatabaseError("Unable to query package cache") from exc
+
+    def mark_package_cached(self, package: str, ecosystem: str, vulnerability_count: int):
+        """Record a completed upstream lookup, including an empty result."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO package_cache
+                    (package_name, ecosystem, checked_at, vulnerability_count)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(package_name, ecosystem) DO UPDATE SET
+                        checked_at = excluded.checked_at,
+                        vulnerability_count = excluded.vulnerability_count
+                    """,
+                    (package, ecosystem, time.time(), vulnerability_count),
+                )
+        except sqlite3.Error as exc:
+            logger.error("Unable to cache package lookup %s: %s", package, exc, exc_info=True)
+            raise DatabaseError("Unable to cache package lookup") from exc
+
     def clear(self):
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM vulnerabilities")
+                conn.execute("DELETE FROM package_cache")
         except sqlite3.Error as exc:
             logger.error("Unable to clear vulnerability database: %s", exc, exc_info=True)
             raise DatabaseError("Unable to clear vulnerability database") from exc

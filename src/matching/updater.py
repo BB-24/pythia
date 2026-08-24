@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import random
+import time
 from collections.abc import Mapping
+from threading import Lock
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -16,6 +19,9 @@ class IntelligenceUpdater:
         self.db_client = db_client
         self.osv_url = "https://api.osv.dev/v1/query"
         self.nvd_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+        self.cache_ttl_seconds = 24 * 60 * 60
+        self._rate_lock = Lock()
+        self._next_request_at = 0.0
         self.session = requests.Session()
         retry = Retry(
             total=3,
@@ -32,6 +38,8 @@ class IntelligenceUpdater:
         """FR 3.1: Fetches vulnerability data from OSV and caches it locally."""
         if not package_name:
             return
+        if self.db_client.is_package_cached(package_name, ecosystem, self.cache_ttl_seconds):
+            return
 
         osv_vulns = self._fetch_osv(package_name, ecosystem)
         for vuln in osv_vulns:
@@ -41,11 +49,44 @@ class IntelligenceUpdater:
             nvd_vulns = self._fetch_nvd(package_name)
             for vuln in nvd_vulns:
                 self._cache_vulnerability(vuln, package_name, ecosystem, source="NVD")
+            osv_vulns = nvd_vulns
+        self.db_client.mark_package_cached(package_name, ecosystem, len(osv_vulns))
+
+    def prefetch_packages(self, packages: list[tuple[str, str]]):
+        """Refresh uncached packages; suitable for a scheduled updater process."""
+        failures = []
+        for package_name, ecosystem in dict.fromkeys(packages):
+            try:
+                self.fetch_and_cache(package_name, ecosystem)
+            except UpstreamAPIError as exc:
+                failures.append((package_name, ecosystem))
+                logger.warning("Upstream lookup unavailable for %s: %s", package_name, exc)
+        return failures
+
+    def _request(self, method: str, url: str, **kwargs):
+        """Apply a shared token bucket and bounded jittered 429 retries."""
+        for attempt in range(6):
+            with self._rate_lock:
+                delay = self._next_request_at - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                self._next_request_at = time.monotonic() + 0.6
+            request = self.session.post if method == "POST" else self.session.get
+            response = request(url, **kwargs)
+            if response.status_code != 429 or attempt == 5:
+                return response
+            retry_after = response.headers.get("Retry-After")
+            try:
+                delay = float(retry_after)
+            except (TypeError, ValueError):
+                delay = 2 ** attempt
+            time.sleep(min(delay, 16) + random.uniform(0, 0.25))
+        return response
 
     def _fetch_osv(self, package_name: str, ecosystem: str):
         payload = {"package": {"name": package_name, "ecosystem": ecosystem}}
         try:
-            response = self.session.post(self.osv_url, json=payload, timeout=10)
+            response = self._request("POST", self.osv_url, json=payload, timeout=10)
             if response.status_code >= 400:
                 raise UpstreamAPIError(f"OSV returned HTTP {response.status_code}")
             data = response.json()
@@ -57,7 +98,7 @@ class IntelligenceUpdater:
     def _fetch_nvd(self, package_name: str):
         params = {"keywordSearch": package_name, "resultsPerPage": 5, "startIndex": 0}
         try:
-            response = self.session.get(self.nvd_url, params=params, timeout=10)
+            response = self._request("GET", self.nvd_url, params=params, timeout=10)
             if response.status_code >= 400:
                 raise UpstreamAPIError(f"NVD returned HTTP {response.status_code}")
             results = response.json().get("vulnerabilities", [])

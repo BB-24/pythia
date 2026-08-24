@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+from contextlib import contextmanager
 from pathlib import Path
 
 _CONFIGURED = False
@@ -44,3 +45,24 @@ def configure_logging(log_path: str | Path = "logs/scanner.log") -> logging.Logg
 
 
 logger = configure_logging()
+
+
+@contextmanager
+def scan_logging(scan_id: str, log_dir: str | Path = "logs"):
+    """Write one scan's records to a dedicated log file."""
+    log_path = Path(log_dir) / f"{scan_id}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+    ))
+    logger.addHandler(handler)
+    try:
+        logger.info("Scan started: %s", scan_id)
+        yield log_path
+    finally:
+        logger.info("Scan finished: %s", scan_id)
+        logger.removeHandler(handler)
+        handler.close()
