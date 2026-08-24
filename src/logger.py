@@ -69,7 +69,7 @@ def scan_logging(scan_id: str, log_dir: str | Path = "logs"):
 
 
 @contextmanager
-def quiet_console_logging(level: int = logging.WARNING):
+def quiet_console_logging(level: int = logging.ERROR):
     """Temporarily hide routine library logging from the interactive console."""
     console_handlers = [
         handler for handler in logger.handlers

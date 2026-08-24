@@ -185,7 +185,7 @@ pythia/
 | Package | Purpose |
 |---------|---------|
 | `httpx` | Async HTTP client for registry & OSV/NVD APIs |
-| `typer` | CLI framework |
+| `click` | CLI framework |
 | `pydantic` | Data validation & settings |
 | `sqlalchemy` + `aiosqlite` | Async ORM for vulnerability cache |
 | `packaging` | Version parsing & comparison (PEP 440) |
